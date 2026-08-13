@@ -4,7 +4,10 @@
   <Project Path="SampleApp.Common/SampleApp.Common.csproj" />
   <Project Path="SampleApp.Domain.Tests/SampleApp.Domain.Tests.csproj" />
   <Project Path="SampleApp.Domain/SampleApp.Domain.csproj" />
+  <Project Path="SampleApp.MSTest.Tests/SampleApp.MSTest.Tests.csproj" />
   <Project Path="SampleApp.Reflection/SampleApp.Reflection.csproj" />
   <Project Path="SampleApp.Services.Tests/SampleApp.Services.Tests.csproj" />
   <Project Path="SampleApp.Services/SampleApp.Services.csproj" />
+  <Project Path="SampleApp.TUnit.Tests/SampleApp.TUnit.Tests.csproj" />
+  <Project Path="SampleApp.Xunit.Tests/SampleApp.Xunit.Tests.csproj" />
 </Solution>

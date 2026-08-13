@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <!-- These tests drive real `dotnet build` runs of the sample solution; the tool
+         itself is TFM-agnostic, so running the suite once is enough. -->
+    <TargetFrameworks>net8.0</TargetFrameworks>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="NUnit" Version="4.3.2" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\TestTrace.Core\TestTrace.Core.csproj" />
+    <ProjectReference Include="..\..\src\TestTrace.Cli\TestTrace.Cli.csproj" />
+  </ItemGroup>
+</Project>

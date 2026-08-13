@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>testtrace</AssemblyName>
+    <RootNamespace>TestTrace.Cli</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- Ships as a .NET tool so it is invoked as plain `testtrace`.
+         The command name deliberately has no `dotnet-` prefix: `dotnet-trace` is an
+         existing Microsoft diagnostics tool and the two would sit adjacent in
+         tab-completion. Do not reintroduce the prefix. -->
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>testtrace</ToolCommandName>
+    <PackageId>TestTrace</PackageId>
+    <Version>0.1.0</Version>
+    <Description>IL-level test impact analysis for .NET. Compares two builds and emits a test filter for the tests that could be affected.</Description>
+    <PackageTags>testing;test-impact-analysis;dotnet-test;ci</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageOutputPath>$(MSBuildThisFileDirectory)../../artifacts/nupkg</PackageOutputPath>
+    <Authors>Matt Storey</Authors>
+    <Copyright>Copyright (c) 2026 Matt Storey</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/matt-storey/testtrace</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/matt-storey/testtrace</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" Version="2.0.*" />
+    <!-- FilterHelper.Escape only: filter escaping is easy to get subtly wrong.
+         If the dependency tree ever becomes a problem, reimplement against this
+         implementation as the test oracle (see plan notes). -->
+    <PackageReference Include="Microsoft.TestPlatform.ObjectModel" Version="17.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\TestTrace.Core\TestTrace.Core.csproj" />
+  </ItemGroup>
+</Project>

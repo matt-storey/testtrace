@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="NUnit" Version="4.3.2" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.*" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\TestTrace.Core\TestTrace.Core.csproj" />
+    <!-- FilterEmitter lives in the CLI but is pure logic, so its tests belong with the
+         fast unit suite rather than the end-to-end scenarios. -->
+    <ProjectReference Include="..\..\src\TestTrace.Cli\TestTrace.Cli.csproj" />
+  </ItemGroup>
+</Project>

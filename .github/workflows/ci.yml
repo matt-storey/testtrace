@@ -1,0 +1,171 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  # The scenario suite shells out to `dotnet build` repeatedly; a first-run experience
+  # in the middle of that just adds noise.
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  # Fast feedback, and the one job worth running on more than one OS: testtrace does a
+  # fair amount of path handling (PDB document matching, glob normalisation, tree-path
+  # emission) that behaves differently under Windows separators.
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          # Both, because src/ and tests/ multi-target net8.0;net10.0.
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.Build.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - run: dotnet restore TestTrace.slnx
+
+      - run: dotnet build TestTrace.slnx -c Release --no-restore
+
+      - name: Unit tests (both target frameworks)
+        run: >
+          dotnet test tests/TestTrace.Core.Tests -c Release --no-build
+          --logger "trx;LogFileName=unit-${{ matrix.os }}.trx"
+          --results-directory ${{ github.workspace }}/test-results
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results-${{ matrix.os }}
+          path: test-results
+          if-no-files-found: ignore
+
+  # Separate job because it is slow: it builds the sample solution from scratch for
+  # every scenario, restoring NUnit, xUnit, TUnit and MSTest along the way.
+  scenarios:
+    name: End-to-end scenarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          # The sample builds under both, once per TFM fixture.
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.Build.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - run: dotnet restore TestTrace.slnx
+
+      - run: dotnet build TestTrace.slnx -c Release --no-restore
+
+      # Warms the package cache for the sample, which the scenario suite copies and
+      # rebuilds many times over. Without this the first scenario pays for every restore.
+      - name: Prime the sample's packages
+        run: dotnet restore sample/SampleApp.slnx
+
+      - name: Scenario tests
+        run: >
+          dotnet test tests/TestTrace.Scenarios.Tests -c Release --no-build
+          --logger "trx;LogFileName=scenarios.trx"
+          --results-directory ${{ github.workspace }}/test-results
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenario-test-results
+          path: test-results
+          if-no-files-found: ignore
+
+  # Packing is not just an artifact step: PackAsTool, ToolCommandName and the packed
+  # README are things only a real pack-install-run cycle exercises.
+  package:
+    name: Package and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [unit, scenarios]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.Build.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # ContinuousIntegrationBuild normalises source paths so the build is reproducible
+      # and SourceLink resolves against the repository rather than a runner path.
+      - name: Pack
+        run: >
+          dotnet pack src/TestTrace.Cli -c Release
+          -p:ContinuousIntegrationBuild=true
+          -o ${{ runner.temp }}/nupkg
+
+      - name: Install the packed tool
+        run: >
+          dotnet tool install TestTrace
+          --add-source ${{ runner.temp }}/nupkg
+          --tool-path ${{ runner.temp }}/tool
+
+      # Prove the packaged form actually analyses something, not merely that it starts.
+      # Analysing a build against its own snapshot must report "nothing affected",
+      # which is exit code 3.
+      - name: Smoke test against the sample solution
+        run: |
+          set -euo pipefail
+          export PATH="${{ runner.temp }}/tool:$PATH"
+          testtrace --help > /dev/null
+          dotnet build sample/SampleApp.slnx -c Release -p:TargetFrameworks=net8.0
+          testtrace snapshot --solution sample/SampleApp.slnx -f net8.0 -o "${{ runner.temp }}/baseline.json"
+          set +e
+          testtrace analyze --solution sample/SampleApp.slnx -f net8.0 \
+            --manifest "${{ runner.temp }}/baseline.json" --test-framework nunit --format filter
+          code=$?
+          set -e
+          if [ "$code" -ne 3 ]; then
+            echo "::error::expected exit 3 (nothing affected) from an unchanged build, got $code"
+            exit 1
+          fi
+          echo "packaged tool analysed the sample and correctly reported nothing affected"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: ${{ runner.temp }}/nupkg/*.nupkg

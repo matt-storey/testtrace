@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TestTrace.Cli/TestTrace.Cli.csproj" />
+    <Project Path="src/TestTrace.Core/TestTrace.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TestTrace.Core.Tests/TestTrace.Core.Tests.csproj" />
+    <Project Path="tests/TestTrace.Scenarios.Tests/TestTrace.Scenarios.Tests.csproj" />
+  </Folder>
+</Solution>

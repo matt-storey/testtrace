@@ -1,0 +1,11 @@
+<Project>
+  <!-- Applies to src/ and tests/. sample/ has its own Directory.Build.props,
+       which MSBuild's nearest-ancestor rule picks instead of this one. -->
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Deterministic>true</Deterministic>
+    <DebugType>portable</DebugType>
+  </PropertyGroup>
+</Project>

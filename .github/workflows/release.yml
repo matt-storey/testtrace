@@ -1,0 +1,111 @@
+name: Release
+
+# Tags only. Nothing on a branch can publish, so a push to main can never ship a
+# package by accident.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  # The tag is the version. Reject anything that is not plain MAJOR.MINOR.PATCH here,
+  # before any work happens — a malformed tag should fail in seconds, not after a
+  # ten-minute build.
+  version:
+    name: Read version from tag
+    runs-on: ubuntu-latest
+    outputs:
+      number: ${{ steps.read.outputs.number }}
+    steps:
+      - id: read
+        run: |
+          set -euo pipefail
+          number="${GITHUB_REF_NAME#v}"
+          if ! [[ "$number" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must be vMAJOR.MINOR.PATCH (digits only), got '${GITHUB_REF_NAME}'"
+            exit 1
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "publishing version $number"
+
+  # The full CI suite, called rather than copied, so a release runs exactly the checks
+  # main runs. Passing the version means the package that gets packed, installed and
+  # smoke-tested is the very one published — not a rebuild of it.
+  verify:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+    with:
+      version: ${{ needs.version.outputs.number }}
+
+  publish:
+    name: Publish to NuGet
+    needs: [version, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # The gate. A NuGet version can be delisted but never truly unpublished, so the one
+    # irreversible step waits for a human. Configure the environment in repo settings
+    # with a required reviewer.
+    environment:
+      name: nuget
+      url: https://www.nuget.org/packages/TestTrace
+
+    permissions:
+      contents: read
+      # Required for trusted publishing: GitHub mints an OIDC token that nuget.org
+      # exchanges for a short-lived key, so there is no long-lived secret to leak.
+      id-token: write
+
+    steps:
+      - name: Download the package CI already built and smoke-tested
+        uses: actions/download-artifact@v8
+        with:
+          name: nupkg
+          path: nupkg
+
+      # Belt and braces: the artifact should already carry the tag's version, so a
+      # mismatch means the wrong thing is about to be published.
+      - name: Verify the packaged version matches the tag
+        run: |
+          set -euo pipefail
+          expected="${{ needs.version.outputs.number }}"
+          file=$(ls nupkg/*.nupkg)
+          packaged=$(basename "$file" .nupkg)
+          packaged="${packaged#TestTrace.}"
+          if [ "$expected" != "$packaged" ]; then
+            echo "::error::expected version '$expected' but the package is '$packaged'"
+            exit 1
+          fi
+          echo "publishing TestTrace $packaged"
+          ls -la nupkg
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Exchange the OIDC token for a short-lived NuGet key
+        id: login
+        uses: NuGet/login@v1
+        with:
+          # Your nuget.org PROFILE NAME, not your email address. NuGet's own guidance
+          # is to keep it in a secret rather than a plain variable.
+          user: ${{ secrets.NUGET_USER }}
+
+      # --skip-duplicate makes a re-run harmless: if the version is already up there,
+      # this succeeds instead of failing the job.
+      - name: Push package
+        run: >
+          dotnet nuget push "nupkg/*.nupkg"
+          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
+
+      # Pushed separately: the *.nupkg glob above does not match *.snupkg.
+      - name: Push symbols
+        run: >
+          dotnet nuget push "nupkg/*.snupkg"
+          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate

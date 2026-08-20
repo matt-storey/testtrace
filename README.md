@@ -1,5 +1,7 @@
 # testtrace
 
+[![CI](https://github.com/matt-storey/testtrace/actions/workflows/ci.yml/badge.svg)](https://github.com/matt-storey/testtrace/actions/workflows/ci.yml)
+
 **Run only the tests your change could have affected.**
 
 Point testtrace at two builds of your solution. It compares the compiled assemblies,

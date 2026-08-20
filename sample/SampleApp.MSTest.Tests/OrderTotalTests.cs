@@ -61,7 +61,7 @@ public class OrderTotalTests
     }
 
     [TestMethod]
-    [DynamicData(nameof(LineCounts), DynamicDataSourceType.Method)]
+    [DynamicData(nameof(LineCounts))]
     public async Task EstimateDeliveryDays_DependsOnLineCount(int lineCount, int expectedDays)
     {
         var order = new Order { Customer = new Customer(3, "Bulk", "b@example.com") };

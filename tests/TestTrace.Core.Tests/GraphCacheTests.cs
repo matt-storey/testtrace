@@ -87,4 +87,93 @@ public class GraphCacheTests
     [Test]
     public void TryLoad_UnknownKey_ReturnsNull() =>
         Assert.That(GraphCache.TryLoad("no-such-key-" + Guid.NewGuid().ToString("N")), Is.Null);
+
+    // -- per-assembly partial keys --------------------------------------------
+
+    private static readonly Dictionary<string, string> Mvids = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["App"] = "m-app",
+        ["Lib"] = "m-lib",
+        ["Other"] = "m-other",
+    };
+
+    private static string PartialKey(
+        string assembly, string[] closure, string scope = "pdb-adjacent",
+        string framework = "nunit", Dictionary<string, string>? mvids = null) =>
+        GraphCache.KeyForAssembly(assembly, mvids ?? Mvids, closure, scope, framework);
+
+    [Test]
+    public void KeyForAssembly_ChangesWhenAReferencedAssemblyChanges()
+    {
+        // THE property the whole per-assembly cache rests on. Scanning App resolves
+        // types out of Lib — interfaces and base types for polymorphism edges, the base
+        // chain for controller detection. Deterministic builds mean App's own MVID does
+        // NOT move when only Lib changes, so keying on App alone would serve a partial
+        // that is missing edges. A dropped edge is a dropped test.
+        var before = PartialKey("App", ["Lib"]);
+
+        var afterLibChanged = new Dictionary<string, string>(Mvids, StringComparer.OrdinalIgnoreCase)
+        {
+            ["Lib"] = "m-lib-CHANGED",
+        };
+
+        Assert.That(PartialKey("App", ["Lib"], mvids: afterLibChanged), Is.Not.EqualTo(before),
+            "a change in a referenced assembly must invalidate this assembly's partial");
+    }
+
+    [Test]
+    public void KeyForAssembly_IgnoresAssembliesOutsideItsClosure()
+    {
+        // The point of closure keying over whole-build keying: an unrelated assembly
+        // moving must NOT invalidate this one, or nothing is ever reused.
+        var before = PartialKey("App", ["Lib"]);
+
+        var afterUnrelatedChanged = new Dictionary<string, string>(Mvids, StringComparer.OrdinalIgnoreCase)
+        {
+            ["Other"] = "m-other-CHANGED",
+        };
+
+        Assert.That(PartialKey("App", ["Lib"], mvids: afterUnrelatedChanged), Is.EqualTo(before));
+    }
+
+    [Test]
+    public void KeyForAssembly_ChangesWhenTheAssemblyItselfChanges()
+    {
+        var before = PartialKey("App", ["Lib"]);
+        var moved = new Dictionary<string, string>(Mvids, StringComparer.OrdinalIgnoreCase)
+        {
+            ["App"] = "m-app-CHANGED",
+        };
+
+        Assert.That(PartialKey("App", ["Lib"], mvids: moved), Is.Not.EqualTo(before));
+    }
+
+    [Test]
+    public void KeyForAssembly_IsStableRegardlessOfClosureOrdering() =>
+        Assert.That(PartialKey("App", ["Other", "Lib"]), Is.EqualTo(PartialKey("App", ["Lib", "Other"])));
+
+    [Test]
+    public void KeyForAssembly_SeparatesScopeAndFramework()
+    {
+        // Same reasons as the merged-graph key: scope decides which edges survive, and
+        // discovery only finds the chosen framework's tests.
+        var baseline = PartialKey("App", ["Lib"]);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(PartialKey("App", ["Lib"], scope: "include=[App]"), Is.Not.EqualTo(baseline));
+            Assert.That(PartialKey("App", ["Lib"], framework: "xunit"), Is.Not.EqualTo(baseline));
+        });
+    }
+
+    [Test]
+    public void PartialKeys_DoNotCollideWithMergedGraphKeys()
+    {
+        // Both live in one directory; a collision would hand a partial to a caller
+        // expecting a whole graph.
+        var partial = "p-" + PartialKey("App", []);
+        var merged = GraphCache.KeyFor(ManifestOf("pdb-adjacent", ("App", "m-app")), "nunit");
+
+        Assert.That(partial, Is.Not.EqualTo(merged));
+    }
 }

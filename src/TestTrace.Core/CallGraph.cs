@@ -34,6 +34,14 @@ public sealed class CallGraphIndex
     public Dictionary<string, List<string>> TestKeysByProviderKey { get; set; } = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// [TestCaseSource]/[MemberData]-style links this assembly declared, resolved
+    /// against every known method key once the partials are merged. It lives on the
+    /// partial rather than in a side channel so that a cached partial is complete —
+    /// otherwise a cache hit would silently drop the assembly's data-source links.
+    /// </summary>
+    public List<ProviderRef> ProviderRefs { get; set; } = [];
+
+    /// <summary>
     /// Names of the frameworks whose marker assemblies are referenced anywhere in
     /// scope, whether or not they were the one discovered. Derived from assembly
     /// references, so it costs a few string compares per assembly — it is what lets
@@ -52,6 +60,14 @@ public sealed class LifecycleTarget
     public TestLifecycleScope Scope { get; set; } = TestLifecycleScope.Fixture;
     public string DeclaringType { get; set; } = "";
     public string Assembly { get; set; } = "";
+}
+
+/// <summary>A data-source reference and the test that consumes it.</summary>
+public sealed class ProviderRef
+{
+    public string TypeFullName { get; set; } = "";
+    public string MemberName { get; set; } = "";
+    public string TestKey { get; set; } = "";
 }
 
 public sealed class TestNode
@@ -148,7 +164,15 @@ public static class CallGraphBuilder
     /// FrameworksPresent) — that comes from assembly references, a handful of string
     /// compares per assembly rather than every detector over every method.
     /// </summary>
-    public static CallGraphIndex Build(IReadOnlyList<string> assemblyPaths, ITestFrameworkDetector detector)
+    public static CallGraphIndex Build(IReadOnlyList<string> assemblyPaths, ITestFrameworkDetector detector) =>
+        Build(assemblyPaths, detector, cache: null);
+
+    /// <param name="cache">
+    /// When supplied, each assembly's partial graph is cached and reused across builds.
+    /// Null disables it, which is what the unit tests use to exercise a clean scan.
+    /// </param>
+    public static CallGraphIndex Build(
+        IReadOnlyList<string> assemblyPaths, ITestFrameworkDetector detector, GraphCacheContext? cache)
     {
         // Assembly name == file name for anything the SDK builds; used to drop edges
         // into the shared framework, which is never part of the diff.
@@ -157,8 +181,33 @@ public static class CallGraphBuilder
             StringComparer.OrdinalIgnoreCase);
 
         var partials = new ConcurrentBag<CallGraphIndex>();
-        var providerRefsBag = new ConcurrentBag<(TestCaseSourceRef Source, string TestKey)>();
-        Parallel.ForEach(assemblyPaths, path => ScanAssembly(path, inSet, detector, partials, providerRefsBag));
+
+        // Per-assembly caching. Scanning an assembly is the expensive half of a build,
+        // and a typical change touches one assembly out of hundreds, so the rest can be
+        // reused verbatim — provided the key covers everything the scan reads.
+        var identity = cache is null ? null : AssemblyIdentities(assemblyPaths, inSet);
+        Parallel.ForEach(assemblyPaths, path =>
+        {
+            var name = Path.GetFileNameWithoutExtension(path);
+            string? key = null;
+            if (cache is not null && identity is not null && identity.Closure.TryGetValue(name, out var closure))
+            {
+                key = GraphCache.KeyForAssembly(name, identity.Mvids, closure, cache.Scope, detector.Name);
+                if (GraphCache.TryLoadPartial(key) is { } cached)
+                {
+                    partials.Add(cached);
+                    return;
+                }
+            }
+
+            var scanned = ScanAssembly(path, inSet, detector);
+            if (scanned is null)
+                return;
+
+            partials.Add(scanned);
+            if (key is not null)
+                GraphCache.TrySavePartial(key, scanned);
+        });
 
         var index = new CallGraphIndex();
         var edgeSets = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
@@ -175,22 +224,23 @@ public static class CallGraphBuilder
             foreach (var (k, v) in partial.SetupFixtureByKey) index.SetupFixtureByKey[k] = v;
             foreach (var (k, v) in partial.BaseTypeOf) index.BaseTypeOf[k] = v;
             foreach (var (k, v) in partial.TypeMembers) index.TypeMembers[k] = v;
+            index.ProviderRefs.AddRange(partial.ProviderRefs);
         }
         foreach (var (key, set) in edgeSets)
             index.Reverse[key] = set.ToList();
 
         // Resolve [TestCaseSource] references now that every method key is known.
-        foreach (var (source, testKey) in providerRefsBag)
+        foreach (var reference in index.ProviderRefs)
         {
-            var candidates = source.MemberName == "*"
-                ? index.TypeMembers.GetValueOrDefault(source.TypeFullName) ?? []
-                : (index.TypeMembers.GetValueOrDefault(source.TypeFullName) ?? [])
-                    .Where(k => KeyNameIs(k, source.MemberName)).ToList();
+            var members = index.TypeMembers.GetValueOrDefault(reference.TypeFullName) ?? [];
+            var candidates = reference.MemberName == "*"
+                ? members
+                : members.Where(k => KeyNameIs(k, reference.MemberName)).ToList();
             foreach (var providerKey in candidates)
             {
                 if (!index.TestKeysByProviderKey.TryGetValue(providerKey, out var list))
                     index.TestKeysByProviderKey[providerKey] = list = [];
-                list.Add(testKey);
+                list.Add(reference.TestKey);
             }
         }
 
@@ -209,10 +259,61 @@ public static class CallGraphBuilder
         }
     }
 
-    private static void ScanAssembly(
-        string path, HashSet<string> inSet, ITestFrameworkDetector detector,
-        ConcurrentBag<CallGraphIndex> partials,
-        ConcurrentBag<(TestCaseSourceRef, string)> providerRefs)
+    /// <summary>Assembly MVIDs, plus the transitive in-scope reference closure of each.
+    /// Transitive because base-chain walks reach through an intermediate assembly into
+    /// one this assembly never references directly.</summary>
+    private sealed record AssemblyIdentity(
+        Dictionary<string, string> Mvids, Dictionary<string, HashSet<string>> Closure);
+
+    private static AssemblyIdentity? AssemblyIdentities(
+        IReadOnlyList<string> assemblyPaths, HashSet<string> inSet)
+    {
+        var mvids = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var direct = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var path in assemblyPaths)
+        {
+            try
+            {
+                using var module = ModuleDefinition.ReadModule(path, new ReaderParameters(ReadingMode.Deferred));
+                var name = module.Assembly?.Name.Name ?? Path.GetFileNameWithoutExtension(path);
+                mvids[name] = module.Mvid.ToString("D");
+                direct[name] = module.AssemblyReferences
+                    .Select(r => r.Name)
+                    .Where(inSet.Contains)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            }
+            catch (Exception)
+            {
+                return null; // unreadable assembly: skip caching rather than risk a wrong key
+            }
+        }
+
+        var closure = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in direct.Keys)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var queue = new Queue<string>(direct[name]);
+            while (queue.Count > 0)
+            {
+                var next = queue.Dequeue();
+                if (!seen.Add(next))
+                    continue;
+                foreach (var onward in direct.GetValueOrDefault(next) ?? [])
+                    queue.Enqueue(onward);
+            }
+
+            closure[name] = seen;
+        }
+
+        return new AssemblyIdentity(mvids, closure);
+    }
+
+    /// <summary>Scans one assembly, or returns null when it is not managed. Returns the
+    /// partial rather than adding it to a shared collection so the caller can cache
+    /// exactly this assembly's result.</summary>
+    private static CallGraphIndex? ScanAssembly(
+        string path, HashSet<string> inSet, ITestFrameworkDetector detector)
     {
         ModuleDefinition module;
         try
@@ -226,7 +327,7 @@ public static class CallGraphBuilder
         }
         catch (BadImageFormatException)
         {
-            return;
+            return null;
         }
 
         var partial = new CallGraphIndex();
@@ -316,7 +417,12 @@ public static class CallGraphBuilder
                             });
 
                             foreach (var source in detector.GetTestCaseSources(method))
-                                providerRefs.Add((source, key));
+                                partial.ProviderRefs.Add(new ProviderRef
+                                {
+                                    TypeFullName = source.TypeFullName,
+                                    MemberName = source.MemberName,
+                                    TestKey = key,
+                                });
                         }
 
                         var lifecycle = detector.GetLifecycleScope(method);
@@ -339,7 +445,7 @@ public static class CallGraphBuilder
 
         foreach (var (key, set) in edges)
             partial.Reverse[key] = set.ToList();
-        partials.Add(partial);
+        return partial;
     }
 
     /// <summary>

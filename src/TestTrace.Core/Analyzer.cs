@@ -428,7 +428,11 @@ public static class Analyzer
             // In-scope assemblies only: the caller of one of your changed methods is
             // your code, and framework callbacks are covered by type-node edges.
             graph = CallGraphBuilder.Build(
-                AssemblyScanner.InScopePaths(currentDirectories, scope), framework);
+                AssemblyScanner.InScopePaths(currentDirectories, scope),
+                framework,
+                // Per-assembly caching: a build usually differs from the last one by a
+                // single assembly, and the rest can be reused rather than rescanned.
+                new GraphCacheContext(current.Scope));
             GraphCache.TrySave(cacheKey, graph);
         }
 

@@ -237,10 +237,32 @@ Cost is **linear** in the number of in-scope methods — including with interfac
 virtual overrides throughout, which is what exercises the polymorphism edges. Nothing
 quadratic showed up at this size.
 
-Cold is now dominated by building the call graph, since the graph cache is keyed on the
-whole MVID set and therefore misses on every new build — which in CI is every run. Warm
-shows what per-assembly graph caching would recover: **0.58 s against 3.7 s** at 64,000
-methods.
+The `analyze cold` column above predates per-assembly caching. Building the call graph
+dominated it, and the merged-graph cache is keyed on the whole build, so in CI — where
+every run is a new build — it missed every time.
+
+Each assembly's partial graph is now cached separately, so a new build rescans only what
+changed. The saving depends on *where* the change is, measured at 64,000 methods:
+
+| Change | `analyze` |
+|---|---|
+| a leaf assembly nothing depends on | **1.1 s** |
+| a core library everything depends on | 3.8 s |
+| nothing (same build re-analysed) | 0.6 s |
+
+A partial's key covers its own identity **and that of everything it transitively
+references**, which is what makes it sound rather than merely fast. Scanning an assembly
+resolves interfaces, base types and injected fixtures out of assemblies it references,
+and deterministic builds make the hazard reachable rather than theoretical: when a
+referenced assembly changes but this one's IL does not, its MVID is unchanged, so a
+self-keyed entry would serve a partial missing edges — and a dropped edge is a dropped
+test.
+
+The worst-case row is the price of that soundness: a change at the bottom of the
+dependency graph invalidates everything above it. That is no worse than the whole-build
+key it replaces, so the change can only help. Making it uniformly fast would mean moving
+the cross-assembly resolution out of the per-assembly scan and into the merge, so that
+partials depend on nothing but themselves — a larger refactor, not yet done.
 
 Also worth knowing for CI: the manifest is ~8.6 MB at 64,000 methods and gets published
 and fetched per commit, so it is worth compressing at that scale.
@@ -261,10 +283,9 @@ testtrace snapshot --input $BIN -o baseline.json --include-assemblies 'MyCompany
 testtrace analyze  --manifest baseline.json --current $BIN --test-framework nunit --include-assemblies 'MyCompany.*'
 ```
 
-Remaining scaling considerations for very large solutions: the graph cache is keyed on
-the current build's MVID set and scope, so it misses on every new build, and
-per-assembly caching is the outstanding win (see the table above — it is the whole gap
-between cold and warm). `ContentHasher` still reads whole assemblies into memory under
+Remaining scaling considerations for very large solutions: the graph cache now works at
+two levels — a merged graph keyed on the whole build, and per-assembly partials keyed on
+each assembly's transitive reference closure — so a new build rescans only what changed. `ContentHasher` still reads whole assemblies into memory under
 unbounded parallelism. `AddPolymorphismEdges` and the fixture-selection walk were the
 suspected quadratic shapes; measured up to 64,000 methods and 160 fixtures, with
 interfaces and virtual overrides throughout, neither showed super-linear growth.
